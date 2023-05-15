@@ -8,14 +8,16 @@ using namespace std;
 
 int main(int, char**) {
 
-    DataLoader data_loader("/home/pxy/oSLAM/data/unit_test");
+    DataLoader data_loader("/home/panxiaoyu/Desktop/oSLAM/data/unit_test");
     Mat rgb, depth;
     bool ret;
     ret = data_loader.pop(rgb, depth);
     ret = data_loader.pop(rgb, depth);
 
-    imwrite("./rgb.png", rgb);
-    imwrite("./depth.png", depth);
+    imshow("./rgb.png", rgb);
+    imshow("./depth.png", depth);
+
+    waitKey(0);
 
     cout << "Hello, oSLAM!" << endl;
 

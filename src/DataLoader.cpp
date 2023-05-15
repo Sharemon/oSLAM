@@ -14,7 +14,6 @@ DataLoader::DataLoader(string data_folder, string idx_filename)
         DataLoader::idx_filestream.close();
 
     DataLoader::idx_filestream.open(DataLoader::idx_filename, ios::in);
-    cout << DataLoader::idx_filestream.is_open() <<endl;
 }
 
 DataLoader::~DataLoader()
