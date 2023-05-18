@@ -1,2 +1,4 @@
 build
 data/rgbd_dataset_freiburg1_desk
+data/rgbd_dataset_freiburg2_desk
+.vscode

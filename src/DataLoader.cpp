@@ -22,21 +22,24 @@ DataLoader::~DataLoader()
         DataLoader::idx_filestream.close();
 }
 
-double DataLoader::pop(Mat& rgb, Mat& depth)
+double DataLoader::pop(Mat& rgb, Mat& depth, Eigen::Vector3d& pos, Eigen::Quaterniond& quad)
 {
     if (!DataLoader::idx_filestream.is_open())
-        return false;
+        return -1;
 
-    string timestamp_rgb, timestamp_depth, filepath_rgb, filepath_depth;
-    DataLoader::idx_filestream >> timestamp_rgb >> filepath_rgb >> timestamp_depth >> filepath_depth;
+    string timestamp_gt, timestamp_rgb, timestamp_depth, filepath_rgb, filepath_depth;
+    DataLoader::idx_filestream 
+        >> timestamp_gt >> pos(0) >> pos(1) >> pos(2) 
+        >> quad.x() >> quad.y() >> quad.z() >> quad.w()
+        >> timestamp_rgb >> filepath_rgb >> timestamp_depth >> filepath_depth;
 
-    double timestamp = stod(timestamp_rgb);
+    double timestamp = stod(timestamp_gt);
 
     rgb = imread(data_folder + filepath_rgb);
-    depth = imread(data_folder + filepath_depth);
+    depth = imread(data_folder + filepath_depth, IMREAD_UNCHANGED);
 
     if (rgb.empty() || depth.empty())
-        return false;
+        return -1;
 
-    return true;
+    return timestamp;
 }
