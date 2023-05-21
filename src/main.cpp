@@ -115,9 +115,10 @@ int main(int argc, char * argv[])
     double cy = 239.5;
     double f = 525;
     double depth_scale = 5000;
-    VisualOdometer vo(500, cx, cy, f, f, depth_scale);
 
     Mat K = (Mat_<double>(3,3) << f, 0, cx, 0, f, cy, 0, 0, 1);
+    VisualOdometer vo(500, K, depth_scale, direct);
+
 
 #if GUI_SHOW_RESULT
     SlamVisualizer visualizer(1504, 960);
@@ -184,7 +185,7 @@ int main(int argc, char * argv[])
             vo.get_3d_points(0, key_pts_3d);
         else
             vo.get_3d_points(-1, key_pts_3d);
-        convert_3d_keypoints_to_pointcloud(key_pts_3d, pts_3d, rgbs, t, q);
+        convert_3d_keypoints_to_pointcloud(key_pts_3d, pts_3d, rgbs, gt_pos, gt_quad);
         visualizer.drawPointCloud(pts_3d, rgbs);
 
         // 画图像
