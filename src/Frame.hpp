@@ -15,5 +15,6 @@ namespace oSLAM
         cv::Mat rgb;
         cv::Mat depth;
         double time_stamp;
+        int idx;
     };
 }

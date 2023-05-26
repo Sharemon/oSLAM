@@ -6,6 +6,7 @@
 #include <Eigen/SVD>
 #include "DataLoader.hpp"
 #include "VisualOdometer.hpp"
+#include "MapVisualOdometer.hpp"
 #include "SlamVisualizer.hpp"
 #include <pangolin/pangolin.h>
 #include <opencv2/core/eigen.hpp>
@@ -15,6 +16,7 @@ using namespace cv;
 using namespace std;
 
 #define GUI_SHOW_RESULT 1
+#define USE_LOCAL_MAP 0
 
 Eigen::Quaterniond R_cvMat_to_eigenQuad(const Mat &R)
 {
@@ -62,9 +64,9 @@ void convert_rgb_depth_to_pointcloud(
 
     Eigen::Matrix3d R = quad.toRotationMatrix();
 
-    for (int y = 0; y < rgb.rows; y++)
+    for (int y = 0; y < rgb.rows; y+=10)
     {
-        for (int x = 0; x < rgb.cols; x++)
+        for (int x = 0; x < rgb.cols; x+=10)
         {
             if (depth.at<ushort>(y, x) == 0)
                 continue;
@@ -108,6 +110,10 @@ int main(int argc, char * argv[])
     Mat rgb, depth;
     Eigen::Vector3d gt_pos;
     Eigen::Quaterniond gt_quad;
+#if USE_LOCAL_MAP
+    Eigen::Vector3d gt_pos_init;
+    Eigen::Quaterniond gt_quad_init;
+#endif
     double timestamp;
     Mat R, T;
     int cnt = 0;
@@ -117,8 +123,11 @@ int main(int argc, char * argv[])
     double depth_scale = 5000;
 
     Mat K = (Mat_<double>(3,3) << f, 0, cx, 0, f, cy, 0, 0, 1);
-    VisualOdometer vo(500, K, depth_scale, direct);
-
+#if USE_LOCAL_MAP
+    MapVisualOdometer vo(300, K, depth_scale, feature_point);
+#else
+    VisualOdometer vo(200, K, depth_scale, direct);
+#endif
 
 #if GUI_SHOW_RESULT
     SlamVisualizer visualizer(1504, 960);
@@ -139,10 +148,22 @@ int main(int argc, char * argv[])
             break;
         }
 
+#if USE_LOCAL_MAP
+        if (cnt == 0)
+        {
+            gt_quad_init = gt_quad;
+            gt_pos_init = gt_pos;
+            vo.set_initial_pose(R_eigenMatrix_to_cvMat(gt_quad.toRotationMatrix()), T_eigenVec_to_cvMat(gt_pos));
+        }
+        
         vo.add(timestamp, rgb, depth);
+#else
+        vo.add(timestamp, rgb, depth);
+
         // 第一帧位姿初值使用gt
         if (cnt == 0)
             vo.set_pose(0, R_eigenMatrix_to_cvMat(gt_quad.toRotationMatrix()), T_eigenVec_to_cvMat(gt_pos));
+#endif
 
         if (cnt == 0)
             vo.get_pose(0, R, T);
@@ -180,12 +201,17 @@ int main(int argc, char * argv[])
         // 画点云
         vector<Point3d> key_pts_3d; 
         vector<Eigen::Vector3d> pts_3d, rgbs;
-        //convert_rgb_depth_to_pointcloud(rgb, depth, pts_3d, rgbs, K, depth_scale, gt_pos, gt_quad);
-        if (cnt == 0)
-            vo.get_3d_points(0, key_pts_3d);
-        else
-            vo.get_3d_points(-1, key_pts_3d);
-        convert_3d_keypoints_to_pointcloud(key_pts_3d, pts_3d, rgbs, gt_pos, gt_quad);
+        convert_rgb_depth_to_pointcloud(rgb, depth, pts_3d, rgbs, K, depth_scale, gt_pos, gt_quad);
+#if USE_LOCAL_MAP
+        //vo.get_all_map_points(key_pts_3d);
+        //convert_3d_keypoints_to_pointcloud(key_pts_3d, pts_3d, rgbs, gt_pos_init, gt_quad_init);
+#else
+        // if (cnt == 0)
+        //     vo.get_3d_points(0, key_pts_3d);
+        // else
+        //     vo.get_3d_points(-1, key_pts_3d);
+        convert_3d_keypoints_to_pointcloud(key_pts_3d, pts_3d, rgbs, t, q);
+#endif
         visualizer.drawPointCloud(pts_3d, rgbs);
 
         // 画图像
@@ -207,10 +233,19 @@ int main(int argc, char * argv[])
             break;
         }
 
+#if USE_LOCAL_MAP
+        if (cnt == 0)
+            vo.set_initial_pose(R_eigenMatrix_to_cvMat(gt_quad.toRotationMatrix()), T_eigenVec_to_cvMat(gt_pos));
+
         vo.add(timestamp, rgb, depth);
+#else
+        vo.add(timestamp, rgb, depth);
+
         // 第一帧位姿初值使用gt
         if (cnt == 0)
             vo.set_pose(0, R_eigenMatrix_to_cvMat(gt_quad.toRotationMatrix()), T_eigenVec_to_cvMat(gt_pos));
+#endif
+
 
         if (cnt == 0)
             vo.get_pose(0, R, T);
@@ -229,8 +264,6 @@ int main(int argc, char * argv[])
         {
             cout << "invalid R,T result" << endl;
         }
-
-        sleep(1);
     }
     auto end = chrono::high_resolution_clock::now();
     chrono::duration<double> duration = end - start;

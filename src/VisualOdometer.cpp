@@ -6,6 +6,7 @@
 
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/block_solver.h>
+#include <g2o/core/robust_kernel_impl.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/robust_kernel.h>
 #include <g2o/solvers/dense/linear_solver_dense.h>
@@ -113,9 +114,67 @@ protected:
 
 public:
     Eigen::Vector3d x_world_;                 // 3D point in world frame
-    float cx_ = 0, cy_ = 0, fx_ = 0, fy_ = 0; // Camera intrinsics
+    double cx_ = 0, cy_ = 0, fx_ = 0, fy_ = 0; // Camera intrinsics
     cv::Mat image_;                // reference image
 };
+
+
+class EdgeProjectXYZ2UVPoseOnly: public g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap >
+{
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    EdgeProjectXYZ2UVPoseOnly() {}
+
+    EdgeProjectXYZ2UVPoseOnly(Eigen::Vector3d point, float fx, float fy, float cx, float cy)
+        : point_(point), fx_(fx), fy_(fy), cx_(cx), cy_(cy)
+    {
+    }
+
+    virtual void computeError()
+    {
+        const g2o::VertexSE3Expmap *v = static_cast<const g2o::VertexSE3Expmap *>(_vertices[0]);
+        Eigen::Vector3d x_local = v->estimate().map(point_);
+        double x = x_local[0] * fx_ / x_local[2] + cx_;
+        float y = x_local[1] * fy_ / x_local[2] + cy_;
+        Eigen::Vector2d preidict_(x, y);
+
+        _error = _measurement - preidict_;
+    }
+
+    virtual void linearizeOplus()
+    {
+        g2o::VertexSE3Expmap *pose = static_cast<g2o::VertexSE3Expmap *>(_vertices[0]);
+        g2o::SE3Quat T(pose->estimate());
+        Eigen::Vector3d xyz_trans = T.map(point_);
+        double x = xyz_trans[0];
+        double y = xyz_trans[1];
+        double z = xyz_trans[2];
+        double z_2 = z * z;
+
+        _jacobianOplusXi(0, 0) = x * y / z_2 * fx_;
+        _jacobianOplusXi(0, 1) = -(1 + (x * x / z_2)) * fx_;
+        _jacobianOplusXi(0, 2) = y / z * fx_;
+        _jacobianOplusXi(0, 3) = -1. / z * fx_;
+        _jacobianOplusXi(0, 4) = 0;
+        _jacobianOplusXi(0, 5) = x / z_2 * fx_;
+
+        _jacobianOplusXi(1, 0) = (1 + y * y / z_2) * fy_;
+        _jacobianOplusXi(1, 1) = -x * y / z_2 * fy_;
+        _jacobianOplusXi(1, 2) = -x / z * fy_;
+        _jacobianOplusXi(1, 3) = 0;
+        _jacobianOplusXi(1, 4) = -1. / z * fy_;
+        _jacobianOplusXi(1, 5) = y / z_2 * fy_;
+    }
+
+    virtual bool read(std::istream &in) {}
+    virtual bool write(std::ostream &os) const {};
+
+    Eigen::Vector3d point_;
+    double cx_ = 0, cy_ = 0, fx_ = 0, fy_ = 0; // Camera intrinsics
+};
+
+
 
 VisualOdometer::VisualOdometer(int max_key_points_num, const cv::Mat &K, double depth_scale, enum VoType type)
 {
@@ -126,6 +185,11 @@ VisualOdometer::VisualOdometer(int max_key_points_num, const cv::Mat &K, double 
     VisualOdometer::fy = K.at<double>(1, 1);
     VisualOdometer::depth_scale = depth_scale;
     VisualOdometer::type = type;
+}
+
+
+VisualOdometer::VisualOdometer()
+{
 }
 
 VisualOdometer::~VisualOdometer()
@@ -151,7 +215,7 @@ void VisualOdometer::calc_depth(const cv::Mat &depth, Frame &frame)
     }
 }
 
-void VisualOdometer::pose_estimation_3d2d(const std::vector<cv::Point3d> &pts1, const std::vector<cv::Point2d> &pts2, cv::Mat &R, cv::Mat &t)
+void VisualOdometer::pose_estimation_3d2d(const std::vector<cv::Point3d> &pts1, const std::vector<cv::Point2d> &pts2, cv::Mat &R, cv::Mat &t, bool use_optimize)
 {
     // 利用PnP求解位姿初值
     Mat K = (Mat_<double>(3, 3) << fx, 0, cx,
@@ -164,8 +228,57 @@ void VisualOdometer::pose_estimation_3d2d(const std::vector<cv::Point3d> &pts1, 
     Rodrigues(rvec, R);
     t = (Mat_<double>(3, 1) << tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
 
-    // 优化位姿和3D点坐标
-    // ToDo
+    if (use_optimize)
+    {
+        // 优化位姿和3D点坐标
+        // 初始化Tcw
+        Eigen::Isometry3d Tcw = Eigen::Isometry3d::Identity();
+
+        Eigen::Matrix3d rotation;
+        cv2eigen(R, rotation);
+        Tcw.rotate(rotation);
+
+        Eigen::Vector3d translation;
+        cv2eigen(t, translation);
+        Tcw.translate(translation);
+
+        // 初始化g2o
+        typedef g2o::BlockSolver<g2o::BlockSolverTraits<6, 6>> Block; // 求解的向量是6＊1的
+        auto linearSolver = g2o::make_unique<g2o::LinearSolverDense<Block::PoseMatrixType>>();
+        auto solver_ptr = g2o::make_unique<Block>(std::move(linearSolver));
+        g2o::OptimizationAlgorithmLevenberg *solver = new g2o::OptimizationAlgorithmLevenberg(std::move(solver_ptr)); // L-M
+        g2o::SparseOptimizer optimizer;
+        optimizer.setAlgorithm(solver);
+        optimizer.setVerbose(false);
+
+        g2o::VertexSE3Expmap *pose = new g2o::VertexSE3Expmap();
+        pose->setEstimate(g2o::SE3Quat(Tcw.rotation(), Tcw.translation()));
+        pose->setId(0);
+        optimizer.addVertex(pose);
+
+        // 添加边
+        for (int i = 0; i < pts1.size(); i++)
+        {
+            EdgeProjectXYZ2UVPoseOnly *edge = new EdgeProjectXYZ2UVPoseOnly(
+                Eigen::Vector3d(pts1[i].x, pts1[i].y, pts1[i].z),
+                fx, fy, cx, cy);
+            edge->setVertex(0, pose);
+            edge->setMeasurement(Eigen::Vector2d(pts2[i].x, pts2[i].y));
+            edge->setInformation(Eigen::Matrix2d::Identity());
+            edge->setId(i);
+            g2o::RobustKernelHuber *rk = new g2o::RobustKernelHuber;
+            edge->setRobustKernel(rk);
+            optimizer.addEdge(edge);
+        }
+        cout << "edges in graph: " << optimizer.edges().size() << endl;
+        optimizer.initializeOptimization();
+        optimizer.optimize(10);
+        Tcw = pose->estimate();
+
+        // 结果转换
+        eigen2cv(Tcw.rotation(), R);
+        t = (Mat_<double>(3, 1) << Tcw.translation()(0), Tcw.translation()(1), Tcw.translation()(2));
+    }
 }
 
 void VisualOdometer::pose_estimation_3d3d(const std::vector<cv::Point3d> &pts1, const std::vector<cv::Point3d> &pts2, cv::Mat &R, cv::Mat &t)
@@ -212,7 +325,7 @@ void VisualOdometer::pose_estimation_3d3d(const std::vector<cv::Point3d> &pts1, 
     t = (Mat_<double>(3, 1) << t_(0, 0), t_(1, 0), t_(2, 0));
 }
 
-void VisualOdometer::calc_pose_from_feature_point(const Frame &ref, Frame &cur, const std::vector<cv::DMatch> &matches)
+void VisualOdometer::calc_pose_from_feature_point(const Frame &ref, Frame &cur, const std::vector<cv::DMatch> &matches, bool use_optimize)
 {
     vector<Point3d> ref_key_points_3d, cur_key_points_3d;
     vector<Point2d> ref_key_points_2d, cur_key_points_2d;
@@ -238,10 +351,13 @@ void VisualOdometer::calc_pose_from_feature_point(const Frame &ref, Frame &cur, 
     // 3D点计算位姿
     Mat R, T;
     // pose_estimation_3d3d(cur_key_points_3d, ref_key_points_3d, R, T);
-    pose_estimation_3d2d(ref_key_points_3d, cur_key_points_2d, R, T);
+    pose_estimation_3d2d(ref_key_points_3d, cur_key_points_2d, R, T, use_optimize);
 
-    cur.R = R * ref.R;
-    cur.T = R * ref.T + T;
+    T = -R.inv() * T;
+    R = R.inv();
+
+    cur.R = ref.R * R;
+    cur.T = ref.R * T + ref.T;
 }
 
 void VisualOdometer::pose_estimation_direct(const vector<Measurement> &measurements, const cv::Mat &gray, Eigen::Matrix3d &K, Eigen::Isometry3d &Tcw)
@@ -305,12 +421,14 @@ void VisualOdometer::calc_pose_direct(const Frame &ref, Frame &cur)
     Eigen::Isometry3d Tcw = Eigen::Isometry3d::Identity();
     pose_estimation_direct(measurements, gray, K_, Tcw);
 
+    Tcw = Tcw.inverse();
+
     Mat R,T;
     eigen2cv(Tcw.rotation(), R);
     T = (Mat_<double>(3,1) << Tcw.translation()(0),  Tcw.translation()(1),  Tcw.translation()(2));
     
-    cur.R = R * ref.R;
-    cur.T = R * ref.T + T;
+    cur.R = ref.R * R;
+    cur.T = ref.R * T + ref.T;
 }
 
 void VisualOdometer::feature_match(const Frame &ref, const Frame &cur, std::vector<cv::DMatch> &matches)
@@ -379,6 +497,7 @@ void VisualOdometer::add(double timestamp, const Mat &rgb, const Mat &depth)
         cvtColor(rgb, gray, CV_BGR2GRAY);
 
         // 选出图像中的关键点（梯度较大的点）
+#if 0
         for (int y = 10; y < rgb.rows - 10; y++)
         {
             for (int x = 10; x < rgb.cols - 10; x++)
@@ -389,12 +508,28 @@ void VisualOdometer::add(double timestamp, const Mat &rgb, const Mat &depth)
                 double ysub1 = gray.at<uchar>(y - 1, x);
                 float grayscale = gray.at<uchar>(y, x);
 
-                if (sqrt(pow(xplus1 - xsub1, 2) + pow(yplus1 - ysub1, 2)) > 100)
+                if (sqrt(pow(xplus1 - xsub1, 2) + pow(yplus1 - ysub1, 2)) > 150)
                 {
                     frame.key_points.push_back(KeyPoint(x, y, 0, 0, grayscale));
                 }
             }
         }
+#else
+        Mat dst, dst_abs;
+        cornerHarris(gray, dst, 2, 3, 0.04, BORDER_DEFAULT);
+        dst_abs = cv::abs(dst);
+        for (int y = 10; y < rgb.rows - 10; y++)
+        {
+            for (int x = 10; x < rgb.cols - 10; x++)
+            {
+                if (dst_abs.at<float>(y, x) > 0.001)
+                {
+                    circle(rgb, Point(x, y), 2, Scalar(0, 255, 0));
+                    frame.key_points.push_back(KeyPoint(x, y, 0, 0, gray.at<uchar>(y,x)));
+                }
+            }
+        }
+#endif
 
         // 提取深度信息
         VisualOdometer::calc_depth(depth, frame);
